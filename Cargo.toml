@@ -1,0 +1,6 @@
+[package]
+name = "chip88"
+version = "0.1.0"
+authors = ["Oscar Linde <ocalinde@axis.com>"]
+
+[dependencies]
