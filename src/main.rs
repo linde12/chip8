@@ -1,9 +1,15 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::copy;
 use std::io::prelude::*;
 
+#[derive(Debug)]
+enum ProgramCounter {
+    Next,
+    Jump(usize)
+}
+
+// TODO: refactor, too generic to be useful
 #[derive(Debug)]
 enum Operand {
     Addr(u16),
@@ -13,28 +19,10 @@ enum Operand {
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 pub enum Register {
-    V0,
-    V1,
-    V2,
-    V3,
-    V4,
-    V5,
-    V6,
-    V7,
-    V8,
-    V9,
-    Va,
-    Vb,
-    Vc,
-    Vd,
-    Ve,
-    Vf,
-
+    V(usize),
     I,
-
     Dt,
     St,
-
     Pc,
     Sp,
 }
@@ -43,7 +31,7 @@ pub enum Register {
 enum Op {
     CLS,                     // Clear
     RET,                     // Return
-    JP(Operand),             // Jump
+    JP(usize),             // Jump
     JPREG(Operand, Operand), // Jump
     CALL(Operand),
     SE(Operand, Operand),  // Skip next if eq
@@ -74,27 +62,28 @@ enum Op {
 }
 
 struct Mmu {
-    mem: Vec<u8>,
+    ram: Vec<u8>,
+    vram: Vec<u8>,
 }
 
 impl Mmu {
     fn new() -> Mmu {
-        Mmu { mem: vec![0; 4096] }
+        Mmu { ram: vec![0; 4096], vram: vec![0; 2048] }
     }
 
     fn read_byte(&self, index: usize) -> Result<u8, String> {
-        if index > self.mem.len() {
+        if index > self.ram.len() {
             Err("unable to read byte".into())
         } else {
-            Ok(self.mem[index])
+            Ok(self.ram[index])
         }
     }
 
     fn read_word(&self, index: usize) -> Result<u16, String> {
-        if index + 1 > self.mem.len() {
+        if index + 1 > self.ram.len() {
             Err("unable to read word".into())
         } else {
-            let word: u16 = ((self.mem[index] as u16) << 8) + self.mem[index + 1] as u16;
+            let word: u16 = ((self.ram[index] as u16) << 8) + self.ram[index + 1] as u16;
             Ok(word)
         }
     }
@@ -105,68 +94,59 @@ impl Mmu {
         }
         // self.mem.clone_from_slice(&rom);
         for (i, item) in rom.iter().enumerate() {
-            self.mem.insert(i + 0x200, *item);
+            self.ram.insert(i + 0x200, *item);
         }
         // copy(&mut self.mem[..], &mut rom);
         // self.mem = rom;
         Ok(())
     }
+
+    fn clear_vram(&mut self) {
+        self.vram.clear();
+    }
 }
 
 struct Cpu {
     mmu: Mmu,
-    reg8: HashMap<Register, u8>,
-    reg16: HashMap<Register, u16>,
+    // general purpose registers
+    v: [u8; 16],
+
+    // address store register
+    i: usize,
+
+    stack: [usize; 16],
     pc: usize,
+    sp: usize,
 }
 
 impl Cpu {
     fn new(mmu: Mmu) -> Cpu {
         Cpu {
             mmu,
-            reg8: HashMap::new(),
-            reg16: HashMap::new(),
+            v: [0u8; 16],
+            i: 0,
+            stack: [0usize; 16],
             pc: 0x200,
+            sp: 0,
         }
-    }
-
-    fn set_reg_8(&mut self, reg: Register, value: u8) {
-        self.reg8.insert(reg, value);
-    }
-
-    fn set_reg_16(&mut self, reg: Register, value: u16) {
-        self.reg16.insert(reg, value);
     }
 
     fn reg_from_nibble(&self, op: u8) -> Option<Register> {
         match op {
-            0 => Some(Register::V0),
-            1 => Some(Register::V1),
-            2 => Some(Register::V2),
-            3 => Some(Register::V3),
-            4 => Some(Register::V4),
-            5 => Some(Register::V5),
-            6 => Some(Register::V6),
-            7 => Some(Register::V7),
-            8 => Some(Register::V8),
-            9 => Some(Register::V9),
+            0..=9 => Some(Register::V(op as usize)),
             _ => None,
         }
     }
 
     fn read_instruction(&mut self) -> Result<Op, String> {
         let op = self.mmu.read_word(self.pc)?;
-        println!("op is {:x?}", op);
-        // self.pc += 2;
-
         let high_nib: u8 = (op >> 12) as u8;
-        // println!("high nib is {:x?}", high_nib);
 
         match op {
             // op if high_nib == 0 => Ok(Op::SYS),
             op if op == 0x00E0 => Ok(Op::CLS),
             op if op == 0x00EE => Ok(Op::RET),
-            op if high_nib == 0x1 => Ok(Op::JP(Operand::Addr(op & 0x0FFF))),
+            op if high_nib == 0x1 => Ok(Op::JP((op & 0x0FFF) as usize)),
             op if high_nib == 0x2 => Ok(Op::CALL(Operand::Addr(op & 0x0FFF))),
             op if high_nib == 0x3 => {
                 let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
@@ -245,7 +225,7 @@ impl Cpu {
                 Operand::Addr(op & 0x0FFF),
             )),
             op if high_nib == 0xB => Ok(Op::JPREG(
-                Operand::Register(Register::V0),
+                Operand::Register(Register::V(0)),
                 Operand::Addr(op & 0x0FFF),
             )),
             op if high_nib == 0xC => {
@@ -327,6 +307,68 @@ impl Cpu {
             }
         }
     }
+
+    fn execute_instruction(&mut self, instruction: Op) {
+        let pc_change = match instruction {
+            Op::CLS => self.clear_vram(),
+            // Op::RET => {}
+            Op::JP(dst) => {
+                ProgramCounter::Jump(dst as usize)
+            }
+            // Op::JPREG(_, _) => {}
+            // Op::CALL(_) => {}
+            // Op::SE(_, _) => {}
+            // Op::SNE(_, _) => {}
+            Op::LD(dst, src) => {
+                if let Operand::Register(dst) = dst {
+                    if let Operand::Byte(src) = src {
+                        match dst {
+                            Register::V(dst) => { self.v[dst] = src; }
+                            _ => panic!("can only load byte int Vx register"),
+                        };
+                    }
+                    if let Operand::Addr(src) = src {
+                        match dst {
+                            Register::I => { self.i = src as usize }
+                            _ => panic!("cannot load address unless dst is i"),
+                        }
+                    }
+                }
+
+                ProgramCounter::Next
+            }
+            // Op::ADD(_, _) => {}
+            // Op::OR(_, _) => {}
+            // Op::AND(_, _) => {}
+            // Op::XOR(_, _) => {}
+            // Op::SUB(_, _) => {}
+            // Op::SHR(_, _) => {}
+            // Op::SUBN(_, _) => {}
+            // Op::SHL(_, _) => {}
+            // Op::RND(_, _) => {}
+            // Op::DRAW(_, _, _) => {}
+            // Op::SKP(_) => {}
+            // Op::SKNP(_) => {}
+            // Op::SKIPKEY(_) => {}
+            // Op::SKIPNOKEY(_) => {}
+            // Op::WAITKEY(_) => {}
+            // Op::SPRITECHAR(_) => {}
+            // Op::MOVBCD(_) => {}
+            // Op::READM(_) => {}
+            // Op::WRITEM(_) => {}
+            _ => ProgramCounter::Next,
+        };
+
+        match pc_change {
+            ProgramCounter::Next => { self.pc += 2 }
+            ProgramCounter::Jump(addr) => { self.pc = addr }
+        }
+    }
+
+    fn clear_vram(&mut self) -> ProgramCounter {
+        self.mmu.clear_vram();
+        ProgramCounter::Next
+    }
 }
 
 fn main() {
@@ -334,10 +376,8 @@ fn main() {
     args.next();
     let fp = args.next().unwrap();
     let mut file = File::open(fp).unwrap();
-    // let rom = vec![0x10, 0x00, 0x20, 0x10];
     let mut rom: Vec<u8> = Vec::with_capacity(100);
     file.read_to_end(&mut rom).unwrap();
-    // println!("buf:\n\n{:x?}", rom);
 
     let mut mmu = Mmu::new();
     mmu.load_rom(rom).expect("failed to load rom");
@@ -345,39 +385,17 @@ fn main() {
     let mut cpu = Cpu::new(mmu);
 
     loop {
-        let mut pc_increment = 2;
         match cpu.read_instruction() {
             Ok(op) => {
-                println!("{:?}", op);
-                match op {
-                    Op::LD(dst, src) => {
-                        if let Operand::Register(dst) = dst {
-                            if let Operand::Byte(src) = src {
-                                cpu.set_reg_8(dst, src);
-                            }
-                            if let Operand::Addr(src) = src {
-                                cpu.set_reg_16(dst, src);
-                            }
-                        }
-                    }
-                    Op::JP(addr) => {
-                        if let Operand::Addr(dst) = addr {
-                            println!("JUMPING TO {}", dst);
-                            cpu.pc = dst as usize;
-                            pc_increment = 0;
-                        }
-                    }
-                    _ => {}, // println!("not sure what to do with {:?}", op),
-                };
+                println!("{:#x}\t{:?}", cpu.pc, op);
+                cpu.pc += 2;
+                // cpu.execute_instruction(op);
             }
             Err(s) => {
                 println!("error reading instruction {}", s);
-                // panic!("no good");
                 break;
             }
         }
-
-        cpu.pc += pc_increment;
     }
 
     println!("Program exited.")
