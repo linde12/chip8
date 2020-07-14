@@ -26,12 +26,11 @@ enum ProgramCounter {
     Jump(usize)
 }
 
-// TODO: refactor, too generic to be useful
 #[derive(Debug)]
 enum Operand {
     Addr(usize),
     Byte(u8),
-    Register(Register), // TODO: Register enum
+    Register(Register),
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
