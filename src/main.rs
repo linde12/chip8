@@ -30,7 +30,7 @@ enum ProgramCounter {
 // TODO: refactor, too generic to be useful
 #[derive(Debug)]
 enum Operand {
-    Addr(u16),
+    Addr(usize),
     Byte(u8),
     Register(Register), // TODO: Register enum
 }
@@ -50,33 +50,33 @@ enum Op {
     CLS,                     // Clear
     RET,                     // Return
     JP(usize),             // Jump
-    JPREG(Operand, Operand), // Jump
-    CALL(Operand),
-    SE(Operand, Operand),  // Skip next if eq
-    SNE(Operand, Operand), // Skip next if not eq
+    JPREG(Operand, usize), // Jump
+    CALL(usize),
+    SE(Register, Operand),  // Skip next if eq
+    SNE(Register, Operand), // Skip next if not eq
     LD(Operand, Operand),
 
-    ADD(Operand, Operand),
-    OR(Operand, Operand),
-    AND(Operand, Operand),
-    XOR(Operand, Operand),
-    SUB(Operand, Operand),
-    SHR(Operand, Operand),
-    SUBN(Operand, Operand),
-    SHL(Operand, Operand),
-    RND(Operand, Operand),
+    ADD(Register, Operand),
+    OR(Register, Operand),
+    AND(Register, Operand),
+    XOR(Register, Operand),
+    SUB(Register, Operand),
+    SHR(Register, Operand),
+    SUBN(Register, Operand),
+    SHL(Register, Operand),
+    RND(Register, u8),
 
-    DRAW(Operand, Operand, Operand),
+    DRAW(Register, Register, usize),
     SKP(Operand),
     SKNP(Operand),
 
-    SKIPKEY(Operand),
-    SKIPNOKEY(Operand),
-    WAITKEY(Operand),
-    SPRITECHAR(Operand),
-    MOVBCD(Operand),
-    READM(Operand),
-    WRITEM(Operand),
+    SKIPKEY(Register),
+    SKIPNOKEY(Register),
+    WAITKEY(Register),
+    SPRITECHAR(Register),
+    MOVBCD(Register),
+    READM(Register),
+    WRITEM(Register),
 }
 
 struct Mmu {
@@ -149,176 +149,59 @@ impl Cpu {
         }
     }
 
-    fn reg_from_nibble(&self, op: u8) -> Result<Register, Chip8Error> {
-        match op {
-            0..=9 => Ok(Register::V(op as usize)),
-            _ => Err(Chip8Error::UnknownRegistry(op)),
-        }
-    }
-
     fn read_instruction(&mut self) -> Result<Op, Chip8Error> {
         let op = self.mmu.read_word(self.pc)?;
-        let high_nib: u8 = (op >> 12) as u8;
+        let nibbles = (
+            (op & 0xF000) >> 12,
+            (op & 0x0F00) >> 8,
+            (op & 0x00F0) >> 4,
+            op & 0x000F,
+        );
+        let nnn: usize = (op & 0x0FFF) as usize;
+        let kk = (op & 0x00FF) as u8;
+        let x = nibbles.1 as usize;
+        let y = nibbles.2 as usize;
+        let n = nibbles.3 as usize;
 
-        match op {
-            // op if high_nib == 0 => Ok(Op::SYS),
-            op if op == 0x00E0 => Ok(Op::CLS),
-            op if op == 0x00EE => Ok(Op::RET),
-            op if high_nib == 0x1 => Ok(Op::JP((op & 0x0FFF) as usize)),
-            op if high_nib == 0x2 => Ok(Op::CALL(Operand::Addr(op & 0x0FFF))),
-            op if high_nib == 0x3 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::SE(Operand::Register(reg), Operand::Byte(op as u8)))
-            }
-            op if high_nib == 0x4 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::SNE(Operand::Register(reg), Operand::Byte(op as u8)))
-            }
-            op if high_nib == 0x5 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::SE(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if high_nib == 0x6 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::LD(Operand::Register(reg), Operand::Byte(op as u8)))
-            }
-            op if high_nib == 0x7 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::ADD(Operand::Register(reg), Operand::Byte(op as u8)))
-            }
+        match nibbles {
+            (0x0, 0x0, 0xE, 0x0) => Ok(Op::CLS),
+            (0x0, 0x0, 0xE, 0xE) => Ok(Op::RET),
+            (0x1, _, _, _) => Ok(Op::JP(nnn)),
+            (0x2, _, _, _) => Ok(Op::CALL(nnn)),
+            (0x3, _, _, _) => Ok(Op::SE(Register::V(x), Operand::Byte(kk))),
+            (0x4, _, _, _) => Ok(Op::SNE(Register::V(x), Operand::Byte(kk))),
+            (0x5, _, _, 0x0) => Ok(Op::SE(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x6, _, _, _) => Ok(Op::LD(Operand::Register(Register::V(x)), Operand::Byte(kk))),
+            (0x7, _, _, _) => Ok(Op::ADD(Register::V(x), Operand::Byte(kk))),
 
-            op if op & 0xF00F == 0x8000 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::LD(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x8001 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::OR(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x8002 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::AND(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x8003 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::XOR(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x8004 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::ADD(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x8005 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::SUB(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x8006 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::SHR(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x8007 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::SUBN(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if op & 0xF00F == 0x800E => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::SHL(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if high_nib == 0x9 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                Ok(Op::SNE(Operand::Register(reg_a), Operand::Register(reg_b)))
-            }
-            op if high_nib == 0xA => Ok(Op::LD(
-                Operand::Register(Register::I),
-                Operand::Addr(op & 0x0FFF),
-            )),
-            op if high_nib == 0xB => Ok(Op::JPREG(
-                Operand::Register(Register::V(0)),
-                Operand::Addr(op & 0x0FFF),
-            )),
-            op if high_nib == 0xC => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::RND(
-                    Operand::Register(reg),
-                    Operand::Byte(op as u8 & 0x00FF),
-                ))
-            }
-            op if high_nib == 0xD => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
-                let nibble = (op >> 4 & 0xF) & 0x00FF;
-                Ok(Op::DRAW(
-                    Operand::Register(reg_a),
-                    Operand::Register(reg_b),
-                    Operand::Byte(nibble as u8),
-                ))
-            }
-            op if op & 0xF0FF == 0xE09E => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::SKIPKEY(Operand::Register(reg)))
-            }
-            op if op & 0xF0FF == 0xE0A1 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::SKIPNOKEY(Operand::Register(reg)))
-            }
-            op if op & 0xF0FF == 0xF007 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::LD(
-                    Operand::Register(reg),
-                    Operand::Register(Register::Dt),
-                ))
-            }
-            op if op & 0xF0FF == 0xF00A => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::WAITKEY(Operand::Register(reg)))
-            }
-            op if op & 0xF0FF == 0xF015 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::LD(
-                    Operand::Register(Register::Dt),
-                    Operand::Register(reg),
-                ))
-            }
-            op if op & 0xF0FF == 0xF018 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::LD(
-                    Operand::Register(Register::St),
-                    Operand::Register(reg),
-                ))
-            }
-            op if op & 0xF0FF == 0xF01E => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::ADD(
-                    Operand::Register(Register::I),
-                    Operand::Register(reg),
-                ))
-            }
-            op if op & 0xF0FF == 0xF029 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::SPRITECHAR(Operand::Register(reg)))
-            }
-            op if op & 0xF0FF == 0xF033 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::MOVBCD(Operand::Register(reg)))
-            }
-            op if op & 0xF0FF == 0xF055 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::READM(Operand::Register(reg)))
-            }
-            op if op & 0xF0FF == 0xF065 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
-                Ok(Op::WRITEM(Operand::Register(reg)))
-            }
+            (0x8, _, _, 0x0) => Ok(Op::LD(Operand::Register(Register::V(x)), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0x1) => Ok(Op::OR(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0x2) => Ok(Op::AND(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0x3) => Ok(Op::XOR(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0x4) => Ok(Op::ADD(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0x5) => Ok(Op::SUB(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0x6) => Ok(Op::SHR(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0x7) => Ok(Op::SUBN(Register::V(x), Operand::Register(Register::V(y)))),
+            (0x8, _, _, 0xE) => Ok(Op::SHL(Register::V(x), Operand::Register(Register::V(y)))),
+
+            (0x9, _, _, 0x0) => Ok(Op::SNE(Register::V(x), Operand::Register(Register::V(y)))),
+            (0xA, _, _, _) => Ok(Op::LD(Operand::Register(Register::I), Operand::Addr(nnn))),
+            (0xB, _, _, _) => Ok(Op::JPREG(Operand::Register(Register::V(0)), nnn)),
+            (0xC, _, _, _) => Ok(Op::RND(Register::V(x), kk)),
+            (0xD, _, _, _) => Ok(Op::DRAW(Register::V(x), Register::V(y), n)),
+
+            (0xE, _, 0x9, 0xE) => Ok(Op::SKIPKEY(Register::V(x))),
+            (0xE, _, 0xA, 0x1) => Ok(Op::SKIPNOKEY(Register::V(x))),
+
+            (0xF, _, _, 0x7) => Ok(Op::LD(Operand::Register(Register::V(x)), Operand::Register(Register::Dt))),
+            (0xF, _, _, 0xA) => Ok(Op::WAITKEY(Register::V(x))),
+            (0xF, _, 0x1, 0x5) => Ok(Op::LD(Operand::Register(Register::Dt), Operand::Register(Register::V(x)))),
+            (0xF, _, 0x1, 0x8) => Ok(Op::LD(Operand::Register(Register::St), Operand::Register(Register::V(x)))),
+            (0xF, _, 0x1, 0xE) => Ok(Op::ADD(Register::I, Operand::Register(Register::V(x)))),
+            (0xF, _, 0x2, 0x9) => Ok(Op::SPRITECHAR(Register::V(x))),
+            (0xF, _, 0x3, 0x3) => Ok(Op::MOVBCD(Register::V(x))),
+            (0xF, _, 0x5, 0x5) => Ok(Op::READM(Register::V(x))),
+            (0xF, _, 0x6, 0x5) => Ok(Op::WRITEM(Register::V(x))),
             _ => Err(Chip8Error::UnknownOperation(op))
         }
     }
