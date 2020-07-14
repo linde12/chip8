@@ -3,6 +3,24 @@ use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 
+use anyhow::{self, Context};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+enum Chip8Error {
+    #[error("Unknown registry V{}", .0)]
+    UnknownRegistry(u8),
+
+    #[error("Unknown operation {:?}", .0)]
+    UnknownOperation(u16),
+
+    #[error("Unable to read word")]
+    ReadWord,
+
+    #[error("Unable to load rom: {}", .0)]
+    LoadRom(String),
+}
+
 #[derive(Debug)]
 enum ProgramCounter {
     Next,
@@ -79,18 +97,18 @@ impl Mmu {
         }
     }
 
-    fn read_word(&self, index: usize) -> Result<u16, String> {
+    fn read_word(&self, index: usize) -> Result<u16, Chip8Error> {
         if index + 1 > self.ram.len() {
-            Err("unable to read word".into())
+            Err(Chip8Error::ReadWord)
         } else {
             let word: u16 = ((self.ram[index] as u16) << 8) + self.ram[index + 1] as u16;
             Ok(word)
         }
     }
 
-    fn load_rom(&mut self, rom: Vec<u8>) -> Result<(), String> {
+    fn load_rom(&mut self, rom: Vec<u8>) -> Result<(), Chip8Error> {
         if rom.len() > 4096 {
-            return Err("rom size too large".into());
+            return Err(Chip8Error::LoadRom("rom size too large".into()));
         }
         // self.mem.clone_from_slice(&rom);
         for (i, item) in rom.iter().enumerate() {
@@ -131,14 +149,14 @@ impl Cpu {
         }
     }
 
-    fn reg_from_nibble(&self, op: u8) -> Option<Register> {
+    fn reg_from_nibble(&self, op: u8) -> Result<Register, Chip8Error> {
         match op {
-            0..=9 => Some(Register::V(op as usize)),
-            _ => None,
+            0..=9 => Ok(Register::V(op as usize)),
+            _ => Err(Chip8Error::UnknownRegistry(op)),
         }
     }
 
-    fn read_instruction(&mut self) -> Result<Op, String> {
+    fn read_instruction(&mut self) -> Result<Op, Chip8Error> {
         let op = self.mmu.read_word(self.pc)?;
         let high_nib: u8 = (op >> 12) as u8;
 
@@ -149,75 +167,75 @@ impl Cpu {
             op if high_nib == 0x1 => Ok(Op::JP((op & 0x0FFF) as usize)),
             op if high_nib == 0x2 => Ok(Op::CALL(Operand::Addr(op & 0x0FFF))),
             op if high_nib == 0x3 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::SE(Operand::Register(reg), Operand::Byte(op as u8)))
             }
             op if high_nib == 0x4 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::SNE(Operand::Register(reg), Operand::Byte(op as u8)))
             }
             op if high_nib == 0x5 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::SE(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if high_nib == 0x6 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::LD(Operand::Register(reg), Operand::Byte(op as u8)))
             }
             op if high_nib == 0x7 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::ADD(Operand::Register(reg), Operand::Byte(op as u8)))
             }
 
             op if op & 0xF00F == 0x8000 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::LD(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x8001 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::OR(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x8002 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::AND(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x8003 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::XOR(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x8004 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::ADD(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x8005 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::SUB(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x8006 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::SHR(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x8007 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::SUBN(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if op & 0xF00F == 0x800E => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::SHL(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if high_nib == 0x9 => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 Ok(Op::SNE(Operand::Register(reg_a), Operand::Register(reg_b)))
             }
             op if high_nib == 0xA => Ok(Op::LD(
@@ -229,15 +247,15 @@ impl Cpu {
                 Operand::Addr(op & 0x0FFF),
             )),
             op if high_nib == 0xC => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::RND(
                     Operand::Register(reg),
                     Operand::Byte(op as u8 & 0x00FF),
                 ))
             }
             op if high_nib == 0xD => {
-                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
-                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8).ok_or("can't read reg from nibble")?;
+                let reg_a = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
+                let reg_b = self.reg_from_nibble((op >> 4 & 0xF) as u8)?;
                 let nibble = (op >> 4 & 0xF) & 0x00FF;
                 Ok(Op::DRAW(
                     Operand::Register(reg_a),
@@ -246,65 +264,62 @@ impl Cpu {
                 ))
             }
             op if op & 0xF0FF == 0xE09E => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::SKIPKEY(Operand::Register(reg)))
             }
             op if op & 0xF0FF == 0xE0A1 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::SKIPNOKEY(Operand::Register(reg)))
             }
             op if op & 0xF0FF == 0xF007 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::LD(
                     Operand::Register(reg),
                     Operand::Register(Register::Dt),
                 ))
             }
             op if op & 0xF0FF == 0xF00A => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::WAITKEY(Operand::Register(reg)))
             }
             op if op & 0xF0FF == 0xF015 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::LD(
                     Operand::Register(Register::Dt),
                     Operand::Register(reg),
                 ))
             }
             op if op & 0xF0FF == 0xF018 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::LD(
                     Operand::Register(Register::St),
                     Operand::Register(reg),
                 ))
             }
             op if op & 0xF0FF == 0xF01E => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::ADD(
                     Operand::Register(Register::I),
                     Operand::Register(reg),
                 ))
             }
             op if op & 0xF0FF == 0xF029 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::SPRITECHAR(Operand::Register(reg)))
             }
             op if op & 0xF0FF == 0xF033 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::MOVBCD(Operand::Register(reg)))
             }
             op if op & 0xF0FF == 0xF055 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::READM(Operand::Register(reg)))
             }
             op if op & 0xF0FF == 0xF065 => {
-                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8).ok_or("can't read reg from nibble")?;
+                let reg = self.reg_from_nibble((op >> 8 & 0x0F) as u8)?;
                 Ok(Op::WRITEM(Operand::Register(reg)))
             }
-            _ => {
-                println!("unknown op {}", high_nib);
-                Err(format!("can't handle op {:x?}", op))
-            }
+            _ => Err(Chip8Error::UnknownOperation(op))
         }
     }
 
@@ -371,16 +386,14 @@ impl Cpu {
     }
 }
 
-fn main() {
-    let mut args = env::args();
-    args.next();
-    let fp = args.next().unwrap();
-    let mut file = File::open(fp).unwrap();
+fn main() -> anyhow::Result<()> {
+    let fp = env::args().nth(1).context("no rom provided")?;
+    let mut file = File::open(fp).context("unable to open rom")?;
     let mut rom: Vec<u8> = Vec::with_capacity(100);
-    file.read_to_end(&mut rom).unwrap();
+    file.read_to_end(&mut rom).context("unable to read rom")?;
 
     let mut mmu = Mmu::new();
-    mmu.load_rom(rom).expect("failed to load rom");
+    mmu.load_rom(rom)?;
 
     let mut cpu = Cpu::new(mmu);
 
@@ -391,12 +404,7 @@ fn main() {
                 cpu.pc += 2;
                 // cpu.execute_instruction(op);
             }
-            Err(s) => {
-                println!("error reading instruction {}", s);
-                break;
-            }
+            Err(err) => return Err(err.into())
         }
     }
-
-    println!("Program exited.")
 }
